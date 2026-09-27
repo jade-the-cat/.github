@@ -1,0 +1,87 @@
+name: Vendor freshness (reusable)
+
+# Holds a repository's vendored copies to their provenance records (HAR-SSOT-001):
+# the committed bytes match each record, each record matches its owner repository at
+# the recorded commit and tag, and no copy is behind the owner's newest release
+# unless the record carries a dated pin. The check is actions/vendor-freshness; the
+# record format is documented in its vendor_freshness/provenance.py.
+#
+# The owners (jade-brand, ...) are private, and GITHUB_TOKEN only reads the calling
+# repository, so this mints a read-only misoto22-release-bot token scoped to the
+# owner repositories the records name. Callers pass the App's client ID variable and
+# private key secret they already hold for release-please. Without the key (a
+# Dependabot pull request gets no Actions secrets) only the byte check runs.
+#
+# Call it with:
+#   jobs:
+#     vendor-freshness:
+#       uses: jade-the-cat/.github/.github/workflows/vendor-freshness.yml@<sha> # main YYYY-MM-DD
+#       with:
+#         app-client-id: ${{ vars.APP_CLIENT_ID }}
+#         provenance: brand/provenance.json
+#       secrets:
+#         APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+on:
+  workflow_call:
+    inputs:
+      app-client-id:
+        description: Client ID of the misoto22-release-bot GitHub App (the APP_CLIENT_ID variable).
+        required: true
+        type: string
+      provenance:
+        description: Provenance JSON files, relative to the repository root, separated by spaces or newlines.
+        required: true
+        type: string
+    secrets:
+      APP_PRIVATE_KEY:
+        description: The misoto22-release-bot private key. Optional; without it only the byte check runs.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HAS_APP_KEY: ${{ secrets.APP_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The token reaches only the owner repositories the records name, read-only.
+      - name: List the owner repositories
+        id: owners
+        if: env.HAS_APP_KEY == 'true'
+        env:
+          PROVENANCE: ${{ inputs.provenance }}
+        run: |
+          set -euo pipefail
+          read -r -a records <<<"$(printf '%s' "$PROVENANCE" | tr '\n' ' ')"
+          repositories="$(jq -r '.repository' "${records[@]}" | sort -u)"
+          owners="$(cut -d/ -f1 <<<"$repositories" | sort -u)"
+          if [ "$(wc -l <<<"$owners")" -ne 1 ]; then
+            echo "::error::The records name owners in more than one account: $(paste -sd' ' - <<<"$owners")"
+            exit 1
+          fi
+          echo "owner=$owners" >> "$GITHUB_OUTPUT"
+          echo "names=$(cut -d/ -f2 <<<"$repositories" | paste -sd, -)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a read-only token for the owner repositories
+        id: token
+        if: env.HAS_APP_KEY == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.owners.outputs.owner }}
+          repositories: ${{ steps.owners.outputs.names }}
+          permission-contents: read
+
+      - name: Check the vendored copies
+        uses: jade-the-cat/.github/actions/vendor-freshness@e106f6e3f80dbf1d845d7146faaee570836161cc # main 2026-09-28
+        with:
+          provenance: ${{ inputs.provenance }}
+          token: ${{ steps.token.outputs.token }}
