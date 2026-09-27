@@ -1,0 +1,44 @@
+name: Vendor freshness
+description: >-
+  Hold every vendored copy to its provenance record: the committed bytes match the
+  record, the record matches the owner repository at the recorded commit, and the
+  copy is not behind the owner's newest release unless a dated pin says why.
+  The reusable workflow .github/workflows/vendor-freshness.yml wraps this action
+  with a release-bot token; call that workflow rather than this action.
+
+inputs:
+  provenance:
+    description: Provenance JSON files, relative to the repository root, separated by spaces or newlines.
+    required: true
+  token:
+    description: >-
+      A token that can read every source repository the records name. Empty runs the
+      byte check only (a Dependabot pull request has no secrets).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Check vendored copies
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PROVENANCE: ${{ inputs.provenance }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # Split on whitespace without expanding globs.
+        set -f
+        records=($PROVENANCE)
+        set +f
+        if [ "${#records[@]}" -eq 0 ]; then
+          echo "::error::The provenance input names no file."
+          exit 2
+        fi
+        mode=()
+        if [ -z "$GH_TOKEN" ]; then
+          echo "::warning::No token: checking the vendored bytes only, not the owner repositories."
+          mode=(--local-only)
+        fi
+        PYTHONPATH="$ACTION_PATH" python3 -m vendor_freshness "${mode[@]}" "${records[@]}"

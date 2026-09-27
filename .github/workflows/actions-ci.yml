@@ -1,0 +1,39 @@
+name: Actions CI
+
+# Tests the composite actions under actions/ that the reusable workflows here call.
+# Every consumer pins those workflows by commit, so a change is only picked up when a
+# consumer bumps its pin; this gate keeps what they pin tested. Stdlib Python only.
+on:
+  pull_request:
+    paths:
+      - "actions/**"
+      - ".github/workflows/actions-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "actions/**"
+      - ".github/workflows/actions-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vendor-freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        working-directory: actions/vendor-freshness
+        run: python3 -m unittest discover -s tests -v
+      # The action itself, on a fixture record, without a token (bytes only).
+      - name: Smoke test the action (intact copy)
+        uses: ./actions/vendor-freshness
+        with:
+          provenance: actions/vendor-freshness/tests/data/provenance.json

@@ -1,0 +1,13 @@
+{
+  "about": "Fixture for the action's smoke test in actions-ci.yml; checked without a token (bytes only).",
+  "repository": "jade-the-cat/.github",
+  "ref": null,
+  "commit": "4a9ff8cf56d9374fa0fbf69b92c79d57605f5919",
+  "files": [
+    {
+      "source": "actions/vendor-freshness/tests/data/copy.txt",
+      "destination": "actions/vendor-freshness/tests/data/copy.txt",
+      "sha256": "ea7f9c32c21f9a8622598e0c791cdafc2bd0ec974e9525febe278122aacaf862"
+    }
+  ]
+}
