@@ -81,7 +81,7 @@ jobs:
           permission-contents: read
 
       - name: Check the vendored copies
-        uses: jade-the-cat/.github/actions/vendor-freshness@e106f6e3f80dbf1d845d7146faaee570836161cc # main 2026-09-28
+        uses: jade-the-cat/.github/actions/vendor-freshness@91e53a7573d0f7622bd9e19c133d8fdb8348b5dd # main 2026-09-28
         with:
           provenance: ${{ inputs.provenance }}
           token: ${{ steps.token.outputs.token }}
