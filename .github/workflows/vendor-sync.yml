@@ -1,0 +1,239 @@
+name: Vendor sync (reusable)
+
+# Opens the pull request that re-vendors an owner repository's release
+# into the calling repository, by running the caller's own sync command against a
+# checkout of the owner at that release. The owner dispatches the caller's workflow on
+# `release: published`; callers also schedule it weekly, so a missed dispatch heals.
+#
+# The pull request is opened with a misoto22-release-bot token, not GITHUB_TOKEN:
+# a pull request opened with GITHUB_TOKEN starts no workflow, so its CI would never
+# run. Two tokens keep the scopes apart: read-only on the owner, contents and pull
+# requests on the caller. The App has no `workflows` permission, so a sync can never
+# change a workflow file.
+#
+# The command runs in the caller's checkout with:
+#   VENDOR_SOURCE_DIR  the owner's checkout at the release (a clean git work tree)
+#   VENDOR_REPOSITORY  owner/name
+#   VENDOR_REF         the release tag
+#   VENDOR_COMMIT      the commit the tag names
+# It copies the files and rewrites the provenance record (and runs any generator).
+# When it fails, the pull request still opens with whatever it changed and the error,
+# and this job fails, so a person or agent finishes the sync.
+#
+# Call it with:
+#   jobs:
+#     brand:
+#       uses: jade-the-cat/.github/.github/workflows/vendor-sync.yml@<sha> # main YYYY-MM-DD
+#       with:
+#         app-client-id: ${{ vars.APP_CLIENT_ID }}
+#         source-repository: jade-the-cat/jade-brand
+#         ref: ${{ inputs.ref }}
+#         command: node scripts/sync-brand.mjs "$VENDOR_SOURCE_DIR"
+#         title: "fix(brand): vendor jade-brand {ref}"
+#       secrets:
+#         APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+on:
+  workflow_call:
+    inputs:
+      app-client-id:
+        description: Client ID of the misoto22-release-bot GitHub App (the APP_CLIENT_ID variable).
+        required: true
+        type: string
+      source-repository:
+        description: The owner repository, owner/name, in the caller's account.
+        required: true
+        type: string
+      ref:
+        description: The owner's release tag to vendor. Empty takes its newest release.
+        required: false
+        type: string
+        default: ""
+      command:
+        description: Bash run in the caller's checkout to copy the files and rewrite the provenance.
+        required: true
+        type: string
+      title:
+        description: Pull request title and commit subject; {ref} becomes the tag. A Conventional Commit.
+        required: true
+        type: string
+    secrets:
+      APP_PRIVATE_KEY:
+        description: The misoto22-release-bot private key.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: vendor-sync-${{ github.repository }}-${{ inputs.source-repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Check the inputs
+        id: names
+        env:
+          SOURCE: ${{ inputs.source-repository }}
+          CALLER: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SOURCE" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || [ "${SOURCE%%/*}" != "${CALLER%%/*}" ]; then
+            echo "::error::source-repository must be owner/name in ${CALLER%%/*}, not '$SOURCE'."
+            exit 1
+          fi
+          {
+            echo "owner=${SOURCE%%/*}"
+            echo "source=${SOURCE#*/}"
+            echo "caller=${CALLER#*/}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint a read-only token for the owner
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.names.outputs.owner }}
+          repositories: ${{ steps.names.outputs.source }}
+          permission-contents: read
+
+      - name: Mint a token that may open the pull request here
+        id: caller-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.names.outputs.owner }}
+          repositories: ${{ steps.names.outputs.caller }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Resolve the release
+        id: release
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          SOURCE: ${{ inputs.source-repository }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          tag="$REF"
+          if [ -z "$tag" ]; then
+            tag="$(gh api "repos/$SOURCE/releases/latest" --jq .tag_name)"
+          fi
+          if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::'$tag' is not a release tag."
+            exit 1
+          fi
+          target="$(gh api "repos/$SOURCE/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha')"
+          while [ "${target%% *}" = tag ]; do
+            target="$(gh api "repos/$SOURCE/git/tags/${target#* }" --jq '.object.type + " " + .object.sha')"
+          done
+          {
+            echo "tag=$tag"
+            echo "commit=${target#* }"
+          } >> "$GITHUB_OUTPUT"
+          echo "Vendoring $SOURCE $tag (${target#* })"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: caller
+          token: ${{ steps.caller-token.outputs.token }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.source-repository }}
+          ref: ${{ steps.release.outputs.tag }}
+          path: source
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Run the sync command
+        id: sync
+        working-directory: caller
+        env:
+          COMMAND: ${{ inputs.command }}
+          VENDOR_SOURCE_DIR: ${{ github.workspace }}/source
+          VENDOR_REPOSITORY: ${{ inputs.source-repository }}
+          VENDOR_REF: ${{ steps.release.outputs.tag }}
+          VENDOR_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -uo pipefail
+          bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$RUNNER_TEMP/sync.log"
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ steps.caller-token.outputs.token }}
+          APP_SLUG: ${{ steps.caller-token.outputs.app-slug }}
+          SOURCE: ${{ inputs.source-repository }}
+          SOURCE_NAME: ${{ steps.names.outputs.source }}
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          TITLE_TEMPLATE: ${{ inputs.title }}
+          COMMAND: ${{ inputs.command }}
+          STATUS: ${{ steps.sync.outputs.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            if [ "$STATUS" != 0 ]; then
+              echo "::error::The sync command failed (exit $STATUS) before changing anything."
+              exit 1
+            fi
+            echo "::notice::Already on $SOURCE $TAG: the sync changed nothing."
+            exit 0
+          fi
+          title="${TITLE_TEMPLATE//\{ref\}/$TAG}"
+          branch="vendor/${SOURCE_NAME}-${TAG}"
+          # Never overwrite an open sync pull request: someone may be finishing it.
+          open="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$open" ]; then
+            echo "::notice::#$open already vendors $SOURCE $TAG; leaving it as it is."
+            exit 0
+          fi
+          bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A
+          git commit -q -m "$title" -m "Vendored from $SOURCE $TAG ($COMMIT) by the vendor-sync workflow."
+          git push -q --force origin "HEAD:refs/heads/$branch"
+
+          {
+            echo "Re-vendors [$SOURCE $TAG](https://github.com/$SOURCE/releases/tag/$TAG) (\`$COMMIT\`)."
+            echo
+            echo "Command: \`$COMMAND\`"
+            echo
+            echo '```'
+            git show --stat --format= HEAD
+            echo '```'
+            if [ "$STATUS" != 0 ]; then
+              echo
+              echo "**The sync command failed (exit $STATUS).** This pull request holds what it changed before failing; finish the sync on this branch. The end of its output:"
+              echo
+              echo '```'
+              tail -n 40 "$RUNNER_TEMP/sync.log"
+              echo '```'
+            fi
+            echo
+            echo "Opened by the vendor-sync workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          } > "$RUNNER_TEMP/body.md"
+
+          url="$(gh pr create --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+          number="${url##*/}"
+          echo "::notice::Pull request #$number vendors $SOURCE $TAG."
+
+          # An older release's sync pull request is superseded by this one.
+          gh pr list --state open --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"vendor/${SOURCE_NAME}-\")) | select(.headRefName != \"$branch\") | .number" |
+            while read -r old; do
+              gh pr close "$old" --delete-branch --comment "Superseded by #$number ($SOURCE $TAG)."
+            done
+
+          if [ "$STATUS" != 0 ]; then
+            echo "::error::The sync command failed (exit $STATUS); #$number holds its partial result."
+            exit 1
+          fi
