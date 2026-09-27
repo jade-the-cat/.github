@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import sys
@@ -30,7 +31,7 @@ class Recorder:
 
 def api(answers):
     recorder = Recorder(answers)
-    return GitHubApi(TOKEN, opener=recorder), recorder
+    return GitHubApi(TOKEN, opener=recorder, sleep=lambda attempt: None), recorder
 
 
 class GitHubApiTests(unittest.TestCase):
@@ -69,12 +70,28 @@ class GitHubApiTests(unittest.TestCase):
         self.assertIn("HTTP 401", str(caught.exception))
         self.assertNotIn(TOKEN, str(caught.exception))
 
-    def test_an_unreachable_host_raises(self):
+    def test_an_unreachable_host_raises_after_three_tries(self):
+        calls = []
+
         def offline(request, timeout):
+            calls.append(request)
             raise urllib.error.URLError("no network")
 
-        with self.assertRaises(ApiError):
-            GitHubApi(TOKEN, opener=offline).latest_release("o/r")
+        with self.assertRaises(ApiError) as caught:
+            GitHubApi(TOKEN, opener=offline, sleep=lambda attempt: None).latest_release("o/r")
+        self.assertEqual(len(calls), 3)
+        self.assertIn("failed 3 times", str(caught.exception))
+
+    def test_a_dropped_connection_or_a_5xx_is_retried(self):
+        failures = [http.client.RemoteDisconnected("closed"), urllib.error.HTTPError("u", 502, "bad", {}, io.BytesIO())]
+
+        def flaky(request, timeout):
+            if failures:
+                raise failures.pop(0)
+            return io.BytesIO(b'{"tag_name": "v1"}')
+
+        self.assertEqual(GitHubApi(TOKEN, opener=flaky, sleep=lambda attempt: None).latest_release("o/r"), "v1")
+        self.assertEqual(failures, [])
 
 
 if __name__ == "__main__":

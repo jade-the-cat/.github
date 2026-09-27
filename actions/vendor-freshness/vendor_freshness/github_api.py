@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +13,8 @@ from typing import Callable, Protocol
 API_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
 TIMEOUT_SECONDS = 30
+ATTEMPTS = 3
+RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
 class ApiError(Exception):
@@ -35,10 +39,17 @@ Opener = Callable[[urllib.request.Request, float], object]
 class GitHubApi:
     """Reads files, releases, tags and comparisons with an installation or user token."""
 
-    def __init__(self, token: str, base_url: str = API_URL, opener: Opener | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str = API_URL,
+        opener: Opener | None = None,
+        sleep: Callable[[int], None] | None = None,
+    ) -> None:
         self._token = token
         self._base = base_url.rstrip("/")
         self._open = opener or (lambda request, timeout: urllib.request.urlopen(request, timeout=timeout))
+        self._sleep = sleep or (lambda attempt: time.sleep(2 * attempt))
 
     def file_bytes(self, repository: str, path: str, ref: str) -> bytes | None:
         """The file's bytes at `ref`, or None when the file does not exist there."""
@@ -73,6 +84,17 @@ class GitHubApi:
         return str(json.loads(body)["status"])
 
     def _get(self, path: str, accept: str = "application/vnd.github+json") -> bytes | None:
+        """The body at `path`, None on 404; retries a dropped connection or a 5xx twice."""
+        for attempt in range(1, ATTEMPTS + 1):
+            try:
+                return self._get_once(path, accept)
+            except _Transient as transient:
+                if attempt == ATTEMPTS:
+                    raise ApiError(f"GET {path} failed {ATTEMPTS} times: {transient}") from None
+                self._sleep(attempt)
+        raise AssertionError("unreachable")
+
+    def _get_once(self, path: str, accept: str) -> bytes | None:
         request = urllib.request.Request(
             self._base + path,
             headers={
@@ -89,6 +111,12 @@ class GitHubApi:
             error.close()
             if error.code == 404:
                 return None
+            if error.code in RETRY_STATUSES:
+                raise _Transient(f"HTTP {error.code}") from None
             raise ApiError(f"GET {path} answered HTTP {error.code}") from None
-        except (urllib.error.URLError, TimeoutError) as error:
-            raise ApiError(f"GET {path} failed: {getattr(error, 'reason', error)}") from None
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError) as error:
+            raise _Transient(str(getattr(error, "reason", error)) or type(error).__name__) from None
+
+
+class _Transient(Exception):
+    """A failure worth another try: a dropped connection, a timeout, a 5xx or a 429."""
