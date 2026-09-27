@@ -1,0 +1,1 @@
+A vendored file the smoke test holds to its record.
