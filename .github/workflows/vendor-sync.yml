@@ -159,10 +159,14 @@ jobs:
           VENDOR_REPOSITORY: ${{ inputs.source-repository }}
           VENDOR_REF: ${{ steps.release.outputs.tag }}
           VENDOR_COMMIT: ${{ steps.release.outputs.commit }}
+        # The step's shell is `bash -e`: a failing command must not end the step before its
+        # status is recorded, or the next step never opens the pull request with the partial
+        # sync. With pipefail the pipeline's status is the command's (tee succeeds).
         run: |
           set -uo pipefail
-          bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$RUNNER_TEMP/sync.log"
-          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          status=0
+          bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$RUNNER_TEMP/sync.log" || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Open the pull request
         working-directory: caller
