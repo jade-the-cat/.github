@@ -13,6 +13,6 @@ permissions:
 jobs:
   # The steps, their action pins and the checker live in Misoto22/ci (ADR 0004).
   rules:
-    uses: Misoto22/ci/.github/workflows/harness-rules.yml@4aa358ddaa1226090d7b2794313d0a7b2fef8bb1 # main 2026-11-08
+    uses: Misoto22/ci/.github/workflows/harness-rules.yml@4cfbd9f5951b9609854a5cba803e5ffcc8634673 # main 2026-11-08
     with:
       runs-on: '["ubuntu-latest"]'
